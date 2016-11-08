@@ -14,11 +14,35 @@ const {
   meta,
 } = Ember;
 
+let BufferedProxy;
+
 const keys = Object.keys || Ember.keys;
 const create = Object.create || Ember.create;
 const hasOwnProp = Object.prototype.hasOwnProperty;
+const isComputedProperty = obj => {
+  return obj._dependentKeys && obj._dependentKeys.length;
+};
+const isProxy = (e) => Ember.typeOf(e) === 'instance' && e.get('content') !== undefined;
+const needsProxy = (e) => Ember.typeOf(e) === 'instance' || Ember.typeOf(e) === 'object';
 
-export default Ember.Mixin.create({
+const tryApplyBufferedChanges = obj => {
+  if(obj.applyBufferedChanges && obj.get('content')) {
+    obj.applyBufferedChanges();
+  }
+};
+
+const proxify = (e) => {
+  // Is value a proxy?
+  if(isProxy(e) || !needsProxy(e)) {
+    return e;
+  }
+  return Ember.ObjectProxy.extend(BufferedProxy).create({
+    content: e
+  });
+};
+
+
+BufferedProxy = Ember.Mixin.create({
   buffer: null,
   hasBufferedChanges: false,
 
@@ -41,10 +65,30 @@ export default Ember.Mixin.create({
     }
   },
 
+
+
+  // 1. Has the queried key already been saved to buffer? then return value
+  // 2. If not:
+  //   a) is the queried key a computed property? transfer it to this buffer
+  //      computed property must not be saved as values directly
+  //   b) else proxify value of content object and return new proxy
+
   unknownProperty(key) {
     const buffer = get(this, 'buffer');
 
-    return (hasOwnProp.call(buffer, key)) ? buffer[key] : this._super(key);
+    if(!hasOwnProp.call(buffer, key)) {
+      let rawUnresolvedObject = this.get('content')[key];
+      if(!rawUnresolvedObject) {
+        return rawUnresolvedObject;
+      }
+      if(isComputedProperty(rawUnresolvedObject)) {
+        Ember.defineProperty(this, key, rawUnresolvedObject);
+        return this.get(key);
+      }
+      let unresolvedObject = this.get(`content.${key}`);
+      return this._handleProperty(key, unresolvedObject);
+    }
+    return buffer[key];
   },
 
   setUnknownProperty(key, value) {
@@ -88,6 +132,7 @@ export default Ember.Mixin.create({
     return value;
   },
 
+
   applyBufferedChanges(onlyTheseKeys) {
     const { buffer, content } = getProperties(this, ['buffer', 'content']);
 
@@ -96,7 +141,27 @@ export default Ember.Mixin.create({
         return;
       }
 
-      set(content, key, buffer[key]);
+      let obj = buffer[key];
+      let type = Ember.typeOf(obj);
+      if(type === 'instance' || type === 'object') {
+        if(isArray(obj)) {
+          obj.forEach(tryApplyBufferedChanges);
+          let objs = obj.get('content') || obj;
+          Ember.set(content, key, objs.map(function(e) {
+            return e.get('content') || e;
+          }));
+        } else {
+          tryApplyBufferedChanges(obj);
+          if(obj.toString().indexOf('model') === -1) { // TODO: generalize it...
+            Ember.set(content, key, obj.get('content'));
+          } else {
+            Ember.set(content, key, obj);
+          }
+        }
+      } else {
+        // Could blow up if content is an empty promise.
+        Ember.trySet(content, key, obj);
+      }
     });
 
     this.initializeBuffer(onlyTheseKeys);
@@ -141,5 +206,28 @@ export default Ember.Mixin.create({
     }
 
     return false;
-  }
+  },
+
+
+
+
+  _handleProperty(key, obj) {
+    this.propertyWillChange(key);
+
+    if(Ember.isArray(obj)) {
+      let proxifiedContent = obj.map((e) => proxify(e));
+      this.buffer[key] = Ember.ArrayProxy.create({
+        modelName: obj.get('firstObject.constructor.modelName'), // TODO
+        content: proxifiedContent
+      });
+    } else {
+      this.buffer[key] = proxify(obj);
+    }
+
+    this.propertyDidChange(key);
+
+    return this.buffer[key];
+  },
 });
+
+export default BufferedProxy;

@@ -97,6 +97,7 @@ test('that apply/discard only these keys works', (assert) => {
 
   assert.equal(get(proxy, 'testing'), '1234');
   assert.ok('testing' in content);
+  console.log(JSON.stringify(get(proxy, 'buffer')));
   assert.equal(get(proxy, 'hasBufferedChanges'), false);
   assert.equal(get(content, 'testing'), '1234');
 
